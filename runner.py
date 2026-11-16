@@ -159,7 +159,34 @@ class SlaveRunner:
         # Step 5: Execute Inference
         venv_python = self.sandbox_mgr.get_venv_python(sandbox_dir)
         infer_script = sandbox_dir / "infer.py"
-        test_dataset_path = config.LOCAL_DATASETS_BASE / test_dir_name
+
+        # Resolve test dataset path (handles both day_1 and day1)
+        test_dataset_path = (config.LOCAL_DATASETS_BASE / test_dir_name).resolve()
+        if not test_dataset_path.exists():
+            alt_name = test_dir_name.replace("_", "")
+            alt_path = (config.LOCAL_DATASETS_BASE / alt_name).resolve()
+            if alt_path.exists():
+                test_dataset_path = alt_path
+
+        # Verify test dataset directory exists and has images
+        valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+        if not test_dataset_path.exists():
+            msg = f"Test dataset directory does not exist: {test_dataset_path}"
+            print(f"[INPUT ERROR] {msg}")
+            self._send_result(job_id, status="FAILED", error_message=msg)
+            self._cleanup(sandbox_dir, temp_bundle_path)
+            return
+
+        image_files = [p for p in test_dataset_path.rglob('*') if p.is_file() and p.suffix.lower() in valid_exts]
+        if not image_files:
+            msg = f"No test images found in {test_dataset_path}! Please copy test images (.jpg, .png, etc.) into this folder."
+            print(f"[INPUT ERROR] {msg}")
+            self._send_result(job_id, status="FAILED", error_message=msg)
+            self._cleanup(sandbox_dir, temp_bundle_path)
+            return
+
+        print(f"Found {len(image_files)} test images in {test_dataset_path}")
+
         output_dir = sandbox_dir / "outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -200,11 +227,15 @@ class SlaveRunner:
 
             if res.returncode != 0:
                 print(f"infer.py failed with exit code {res.returncode}!")
+                if res.stderr.strip():
+                    print(f"[infer.py STDERR]:\n{res.stderr.strip()}")
+                if res.stdout.strip():
+                    print(f"[infer.py STDOUT]:\n{res.stdout.strip()}")
                 self._send_result(
                     job_id,
                     status="FAILED",
                     logs=combined_logs,
-                    error_message=f"infer.py exited with code {res.returncode}",
+                    error_message=f"infer.py exited with code {res.returncode}: {res.stderr.strip()}",
                     wall_time_s=wall_elapsed,
                     start_temp=start_temp,
                     end_temp=end_temp,
@@ -272,7 +303,7 @@ class SlaveRunner:
             "timings": timings,
             "benchmark": benchmark,
             "total_wall_time_s": wall_time_s,
-            "logs": logs,
+            "logs": logs[-50000:] if logs else "",
             "hardware_report": {
                 "start_temp": start_temp,
                 "end_temp": end_temp,
@@ -283,7 +314,7 @@ class SlaveRunner:
 
         try:
             print(f"Returning evaluation results for {job_id} to Master ...")
-            r = requests.post(return_url, json=payload, timeout=20)
+            r = requests.post(return_url, json=payload, timeout=30)
             if r.status_code == 200:
                 print(f"[Result Recorded] Job {job_id} returned successfully.")
             else:
