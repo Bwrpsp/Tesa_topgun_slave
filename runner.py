@@ -212,7 +212,15 @@ class SlaveRunner:
                 )
             else:
                 print(f"Inference completed successfully in {wall_elapsed:.2f}s!")
-                predictions = parse_csv_file(output_dir / "predictions.csv")
+                pred_json_file = output_dir / "predictions.json"
+                pred_csv_file = output_dir / "predictions.csv"
+                if pred_json_file.exists():
+                    predictions = parse_json_file(pred_json_file)
+                elif pred_csv_file.exists():
+                    predictions = parse_csv_file(pred_csv_file)
+                else:
+                    predictions = None
+
                 timings = parse_csv_file(output_dir / "timings.csv")
                 benchmark = parse_json_file(output_dir / "benchmark.json")
 
@@ -246,7 +254,7 @@ class SlaveRunner:
         self,
         job_id: str,
         status: str,
-        predictions: Optional[List[Dict[str, Any]]] = None,
+        predictions: Optional[Any] = None,
         timings: Optional[List[Dict[str, Any]]] = None,
         benchmark: Optional[Dict[str, Any]] = None,
         logs: str = "",

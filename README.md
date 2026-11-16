@@ -21,6 +21,7 @@ Evaluation daemon designed to run on Raspberry Pi boards. Pulls inference tasks 
   - Flushes Linux dirty buffers and page cache (`drop_caches`).
 - **Dynamic Multi-Day Test Execution:**
   - Points to local pre-stored test images (`test_datasets/day_{N}/`) according to the active day assigned by Master.
+  - Automatically captures `predictions.csv` (Day 1) or `predictions.json` (Day 2/3), along with `timings.csv` and `benchmark.json`.
 
 ---
 
