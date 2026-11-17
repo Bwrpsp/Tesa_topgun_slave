@@ -205,8 +205,7 @@ class SlaveRunner:
             str(infer_script),
             "--input", str(test_dataset_path),
             "--weights", str(weights_dir),
-            "--out", str(output_dir),
-            "--threads", str(config.INFERENCE_THREADS)
+            "--out", str(output_dir)
         ]
 
         print(f"Executing: {' '.join(cmd)}")
@@ -221,6 +220,25 @@ class SlaveRunner:
             )
             wall_elapsed = time.perf_counter() - wall_start
             combined_logs = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
+
+            # Smart Fallback: if infer.py expects a weight file rather than a folder
+            if res.returncode != 0 and ("IsADirectoryError" in res.stderr or "Errno 21" in res.stderr or "PermissionError" in res.stderr):
+                weight_file = self.sandbox_mgr.find_weight_file(sandbox_dir)
+                if weight_file:
+                    print(f"[Smart Fallback] infer.py expects a single weight file rather than folder.")
+                    print(f"[Smart Fallback] Retrying with file: {weight_file.name} ...")
+                    weights_idx = cmd.index("--weights") + 1
+                    cmd[weights_idx] = str(weight_file)
+                    wall_start = time.perf_counter()
+                    res = subprocess.run(
+                        cmd,
+                        cwd=str(sandbox_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_seconds
+                    )
+                    wall_elapsed = time.perf_counter() - wall_start
+                    combined_logs = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
 
             end_temp = get_temperature()
             end_throttled = get_throttled_flag()

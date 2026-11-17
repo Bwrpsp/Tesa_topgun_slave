@@ -109,6 +109,17 @@ class SandboxManager:
         except subprocess.TimeoutExpired:
             return False, f"Pip install timed out after {timeout_seconds} seconds."
 
+    def find_weight_file(self, sandbox_dir: Path) -> Optional[Path]:
+        """
+        Locates a primary weight file inside weights/ (for contestants whose infer.py takes a file).
+        """
+        weights_dir = sandbox_dir / "weights"
+        if weights_dir.exists() and weights_dir.is_dir():
+            files = [f for f in weights_dir.rglob("*") if f.is_file()]
+            if files:
+                return next((f for f in files if "best" in f.name.lower()), files[0])
+        return None
+
     def find_weights(self, sandbox_dir: Path) -> Optional[Path]:
         """Backward-compatible alias: returns the weights directory."""
         return self.get_weights_dir(sandbox_dir)
