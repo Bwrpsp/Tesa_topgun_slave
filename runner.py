@@ -190,12 +190,12 @@ class SlaveRunner:
         output_dir = sandbox_dir / "outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        weight_path = self.sandbox_mgr.find_weights(sandbox_dir)
-        if not weight_path:
+        weights_dir = self.sandbox_mgr.get_weights_dir(sandbox_dir)
+        if not weights_dir:
             self._send_result(
                 job_id,
                 status="FAILED",
-                error_message="Model weight file not found in sandbox weights/ directory."
+                error_message="Weights folder not found or empty in sandbox weights/ directory."
             )
             self._cleanup(sandbox_dir, temp_bundle_path)
             return
@@ -204,7 +204,7 @@ class SlaveRunner:
             str(venv_python),
             str(infer_script),
             "--input", str(test_dataset_path),
-            "--weights", str(weight_path),
+            "--weights", str(weights_dir),
             "--out", str(output_dir),
             "--threads", str(config.INFERENCE_THREADS)
         ]

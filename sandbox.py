@@ -14,7 +14,18 @@ class SandboxManager:
     and complete post-run cleanup to ensure zero inter-team contamination.
     """
 
-    ALLOWED_WEIGHT_EXTS = {".joblib", ".pt", ".pth", ".onnx", ".bin", ".h5", ".pkl", ".tflite", ".engine"}
+    def get_weights_dir(self, sandbox_dir: Path) -> Optional[Path]:
+        """
+        Locates the model weights folder.
+        Verifies that weights/ exists, is a directory, and contains files (any extension or format).
+        """
+        weights_dir = sandbox_dir / "weights"
+        if weights_dir.exists() and weights_dir.is_dir():
+            files = [f for f in weights_dir.rglob("*") if f.is_file()]
+            if files:
+                return weights_dir
+
+        return None
 
     @staticmethod
     def get_venv_python(sandbox_dir: Path) -> Path:
@@ -99,19 +110,8 @@ class SandboxManager:
             return False, f"Pip install timed out after {timeout_seconds} seconds."
 
     def find_weights(self, sandbox_dir: Path) -> Optional[Path]:
-        """Locates the model weights file."""
-        weights_dir = sandbox_dir / "weights"
-        if weights_dir.exists():
-            for f in weights_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in self.ALLOWED_WEIGHT_EXTS:
-                    return f
-
-        # Fallback: check root
-        for f in sandbox_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in self.ALLOWED_WEIGHT_EXTS:
-                return f
-
-        return None
+        """Backward-compatible alias: returns the weights directory."""
+        return self.get_weights_dir(sandbox_dir)
 
     def purge_sandbox(self, sandbox_dir: Path):
         """
