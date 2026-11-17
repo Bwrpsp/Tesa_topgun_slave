@@ -1,4 +1,6 @@
 import os
+import sys
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,13 +30,17 @@ class SlaveConfig:
     LOCAL_WHEELHOUSE: Path = Path(_raw_wheelhouse).resolve()
 
     _raw_sandbox = os.getenv("SANDBOX_BASE", "/tmp/eval_sandbox")
-    SANDBOX_BASE: Path = (
-        Path(_raw_sandbox) if Path(_raw_sandbox).is_absolute()
-        else (BASE_DIR / _raw_sandbox)
-    ).resolve()
+    if sys.platform == "win32" and _raw_sandbox.startswith(("/tmp", "\\tmp")):
+        SANDBOX_BASE: Path = (Path(tempfile.gettempdir()) / "eval_sandbox").resolve()
+    else:
+        SANDBOX_BASE: Path = (
+            Path(_raw_sandbox) if Path(_raw_sandbox).is_absolute()
+            else (BASE_DIR / _raw_sandbox)
+        ).resolve()
 
     INFERENCE_THREADS: int = int(os.getenv("INFERENCE_THREADS", "2"))
     DEPENDENCY_TIMEOUT_SECONDS: int = int(os.getenv("DEPENDENCY_TIMEOUT_SECONDS", "600"))
+    VERBOSE: bool = os.getenv("VERBOSE", "false").lower() in ("true", "1", "yes")
 
 
 config = SlaveConfig()

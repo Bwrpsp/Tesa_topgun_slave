@@ -3,10 +3,12 @@ import sys
 import csv
 import json
 import time
+import argparse
+import threading
 import requests
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from config import config
 from hardware import (
@@ -17,6 +19,16 @@ from hardware import (
     drop_os_caches
 )
 from sandbox import SandboxManager
+
+
+def format_bytes(size: int) -> str:
+    """Formats raw byte counts into human-readable strings."""
+    s = float(size)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if s < 1024.0:
+            return f"{s:.2f} {unit}"
+        s /= 1024.0
+    return f"{s:.2f} TB"
 
 
 def parse_csv_file(path: Path) -> List[Dict[str, Any]]:
@@ -40,16 +52,80 @@ def parse_json_file(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def run_command_dual_stream(
+    cmd: List[str],
+    cwd: Optional[Path] = None,
+    timeout: Optional[int] = None,
+    verbose: bool = False
+) -> Tuple[int, str, str]:
+    """
+    Executes a subprocess, capturing stdout and stderr separately while
+    streaming them in real time to the console when verbose=True.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    def reader(pipe, container: List[str], prefix: str):
+        for line in iter(pipe.readline, ""):
+            container.append(line)
+            if verbose:
+                sys.stdout.write(f"{prefix}{line}")
+                sys.stdout.flush()
+        pipe.close()
+
+    t_out = threading.Thread(target=reader, args=(proc.stdout, stdout_lines, "   [infer.py stdout] "))
+    t_err = threading.Thread(target=reader, args=(proc.stderr, stderr_lines, "   [infer.py stderr] "))
+    t_out.daemon = True
+    t_err.daemon = True
+    t_out.start()
+    t_err.start()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        t_out.join(timeout=1.0)
+        t_err.join(timeout=1.0)
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output="".join(stdout_lines),
+            stderr="".join(stderr_lines)
+        )
+
+    t_out.join()
+    t_err.join()
+    return proc.returncode, "".join(stdout_lines), "".join(stderr_lines)
+
+
 class SlaveRunner:
-    def __init__(self):
+    def __init__(
+        self,
+        verbose: Optional[bool] = None,
+        slave_id: Optional[str] = None,
+        master_url: Optional[str] = None
+    ):
         self.sandbox_mgr = SandboxManager()
+        self.verbose = verbose if verbose is not None else config.VERBOSE
+        self.slave_id = slave_id or config.SLAVE_ID
+        self.master_url = (master_url or config.MASTER_URL).rstrip("/")
 
     def run(self):
-        print("=" * 60)
-        print(f"TESA Slave Worker [{config.SLAVE_ID}] Initializing")
-        print(f"Master URL: {config.MASTER_URL}")
-        print(f"Max Temp Gate: {config.MAX_TEMPERATURE_CELSIUS}°C")
-        print("=" * 60)
+        print("=" * 65)
+        print(f"TESA Slave Worker [{self.slave_id}] Initializing")
+        print(f"Master URL:          {self.master_url}")
+        print(f"Max Temp Gate:       {config.MAX_TEMPERATURE_CELSIUS}°C")
+        print(f"Dependency Timeout:  {config.DEPENDENCY_TIMEOUT_SECONDS}s")
+        print(f"Verbose Mode:        {'ON (Full real-time streaming)' if self.verbose else 'OFF'}")
+        print("=" * 65)
 
         # Set CPU governor to performance mode for consistent benchmarking
         set_performance_governor()
@@ -68,17 +144,23 @@ class SlaveRunner:
         current_temp = get_temperature()
         throttled_flag = get_throttled_flag()
 
-        poll_url = f"{config.MASTER_URL}/api/v1/jobs/poll"
+        poll_url = f"{self.master_url}/api/v1/jobs/poll"
         params = {
-            "slave_id": config.SLAVE_ID,
+            "slave_id": self.slave_id,
             "current_temp": current_temp,
             "throttled_flag": throttled_flag
         }
 
+        if self.verbose:
+            sys.stdout.write(f"\r[Polling] Checking Master for jobs (Temp: {current_temp:.1f}°C, Throttled: {throttled_flag}) ...")
+            sys.stdout.flush()
+
         try:
             resp = requests.get(poll_url, params=params, timeout=10)
         except requests.RequestException as e:
-            print(f"[Master Unreachable] Could not connect to {config.MASTER_URL}: {e}. Retrying in {config.POLL_INTERVAL_SECONDS}s...")
+            if self.verbose:
+                print()
+            print(f"[Master Unreachable] Could not connect to {self.master_url}: {e}. Retrying in {config.POLL_INTERVAL_SECONDS}s...")
             time.sleep(config.POLL_INTERVAL_SECONDS)
             return
 
@@ -87,6 +169,9 @@ class SlaveRunner:
             time.sleep(config.POLL_INTERVAL_SECONDS)
             return
 
+        if self.verbose:
+            print()  # Break line from polling status
+
         if resp.status_code != 200:
             print(f"[Poll Error] Received HTTP {resp.status_code}: {resp.text}")
             time.sleep(config.POLL_INTERVAL_SECONDS)
@@ -94,26 +179,31 @@ class SlaveRunner:
 
         job_data = resp.json()
         job_id = job_data["job_id"]
+        team_name = job_data.get("team_name", job_id)
         bundle_url = job_data["bundle_url"]
         test_dir_name = job_data.get("test_data_dir_name", "day_1")
         timeout_seconds = job_data.get("timeout_seconds", 300)
 
-        print("\n" + "=" * 60)
-        print(f"[JOB RECEIVED] ID: {job_id} | Test Data Dir: {test_dir_name}")
-        print("=" * 60)
+        print("\n" + "=" * 65)
+        print(f"[JOB RECEIVED] ID: {job_id} | Team: {team_name}")
+        print(f"Test Data Dir: {test_dir_name} | Max Inference Timeout: {timeout_seconds}s")
+        print("=" * 65)
 
         # Step 1: Download Bundle
         temp_bundle_path = config.SANDBOX_BASE / f"tmp_{job_id}.zip"
         temp_bundle_path.parent.mkdir(parents=True, exist_ok=True)
 
-        full_bundle_url = f"{config.MASTER_URL}{bundle_url}"
+        full_bundle_url = f"{self.master_url}{bundle_url}"
         print(f"Downloading bundle from {full_bundle_url} ...")
+        t_dl_start = time.perf_counter()
         try:
             with requests.get(full_bundle_url, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(temp_bundle_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         f.write(chunk)
+            dl_size = temp_bundle_path.stat().st_size
+            print(f"Downloaded bundle ({format_bytes(dl_size)}) in {time.perf_counter() - t_dl_start:.2f}s.")
         except Exception as e:
             self._send_result(job_id, status="FAILED", error_message=f"Bundle download failed: {e}")
             return
@@ -122,7 +212,12 @@ class SlaveRunner:
         print(f"Setting up isolated sandbox environment for {job_id} ...")
         sandbox_dir = None
         try:
-            sandbox_dir = self.sandbox_mgr.setup_sandbox(job_id, temp_bundle_path, config.SANDBOX_BASE)
+            sandbox_dir = self.sandbox_mgr.setup_sandbox(
+                job_id,
+                temp_bundle_path,
+                config.SANDBOX_BASE,
+                verbose=self.verbose
+            )
         except Exception as e:
             self._send_result(job_id, status="FAILED", error_message=f"Sandbox creation failed: {e}")
             if temp_bundle_path.exists():
@@ -131,13 +226,15 @@ class SlaveRunner:
 
         # Step 3: Install Dependencies
         print(f"Installing contestant dependencies (timeout: {config.DEPENDENCY_TIMEOUT_SECONDS}s) ...")
+        t_install_start = time.perf_counter()
         install_ok, install_logs = self.sandbox_mgr.install_dependencies(
             sandbox_dir,
             wheelhouse_dir=config.LOCAL_WHEELHOUSE,
-            timeout_seconds=config.DEPENDENCY_TIMEOUT_SECONDS
+            timeout_seconds=config.DEPENDENCY_TIMEOUT_SECONDS,
+            verbose=self.verbose
         )
         if not install_ok:
-            print(f"Dependency installation failed for {job_id}!")
+            print(f"Dependency installation failed for {job_id} in {time.perf_counter() - t_install_start:.2f}s!")
             self._send_result(
                 job_id,
                 status="FAILED",
@@ -147,6 +244,8 @@ class SlaveRunner:
             self._cleanup(sandbox_dir, temp_bundle_path)
             return
 
+        print(f"Dependencies installed successfully in {time.perf_counter() - t_install_start:.2f}s.")
+
         # Step 4: Fairness & Thermal Gate
         print(f"Checking hardware fairness gate (temp <= {config.MAX_TEMPERATURE_CELSIUS}°C, throttled == 0x0) ...")
         gate_status = wait_for_fair_conditions(
@@ -155,6 +254,8 @@ class SlaveRunner:
         )
         start_temp = gate_status.get("temperature", get_temperature())
         start_throttled = gate_status.get("throttled_flag", get_throttled_flag())
+        if self.verbose:
+            print(f"   [Fairness Gate] Ready. Starting Temp: {start_temp:.1f}°C, Throttled: {start_throttled}")
 
         # Step 5: Execute Inference
         venv_python = self.sandbox_mgr.get_venv_python(sandbox_dir)
@@ -209,69 +310,86 @@ class SlaveRunner:
         ]
 
         print(f"Executing: {' '.join(cmd)}")
+        if self.verbose:
+            print("   --- [infer.py Live Output Stream Start] ---")
+
         wall_start = time.perf_counter()
         try:
-            res = subprocess.run(
+            returncode, stdout_str, stderr_str = run_command_dual_stream(
                 cmd,
-                cwd=str(sandbox_dir),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds
+                cwd=sandbox_dir,
+                timeout=timeout_seconds,
+                verbose=self.verbose
             )
             wall_elapsed = time.perf_counter() - wall_start
-            combined_logs = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
+            combined_logs = f"=== STDOUT ===\n{stdout_str}\n=== STDERR ===\n{stderr_str}"
 
-            # Smart Fallback: if infer.py expects a weight file rather than a folder
-            if res.returncode != 0 and ("IsADirectoryError" in res.stderr or "Errno 21" in res.stderr or "PermissionError" in res.stderr):
+            # Smart Fallback: if infer.py expects a single weight file rather than a directory
+            if returncode != 0 and ("IsADirectoryError" in stderr_str or "Errno 21" in stderr_str or "PermissionError" in stderr_str):
                 weight_file = self.sandbox_mgr.find_weight_file(sandbox_dir)
                 if weight_file:
-                    print(f"[Smart Fallback] infer.py expects a single weight file rather than folder.")
+                    print(f"\n[Smart Fallback] infer.py expects a single weight file rather than folder.")
                     print(f"[Smart Fallback] Retrying with file: {weight_file.name} ...")
                     weights_idx = cmd.index("--weights") + 1
                     cmd[weights_idx] = str(weight_file)
                     wall_start = time.perf_counter()
-                    res = subprocess.run(
+                    returncode, stdout_str, stderr_str = run_command_dual_stream(
                         cmd,
-                        cwd=str(sandbox_dir),
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_seconds
+                        cwd=sandbox_dir,
+                        timeout=timeout_seconds,
+                        verbose=self.verbose
                     )
                     wall_elapsed = time.perf_counter() - wall_start
-                    combined_logs = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
+                    combined_logs = f"=== STDOUT ===\n{stdout_str}\n=== STDERR ===\n{stderr_str}"
+
+            if self.verbose:
+                print("   --- [infer.py Live Output Stream End] ---")
 
             end_temp = get_temperature()
             end_throttled = get_throttled_flag()
 
-            if res.returncode != 0:
-                print(f"infer.py failed with exit code {res.returncode}!")
-                if res.stderr.strip():
-                    print(f"[infer.py STDERR]:\n{res.stderr.strip()}")
-                if res.stdout.strip():
-                    print(f"[infer.py STDOUT]:\n{res.stdout.strip()}")
+            if returncode != 0:
+                print(f"infer.py failed with exit code {returncode}!")
+                if not self.verbose:
+                    if stderr_str.strip():
+                        print(f"[infer.py STDERR]:\n{stderr_str.strip()}")
+                    if stdout_str.strip():
+                        print(f"[infer.py STDOUT]:\n{stdout_str.strip()}")
                 self._send_result(
                     job_id,
                     status="FAILED",
                     logs=combined_logs,
-                    error_message=f"infer.py exited with code {res.returncode}: {res.stderr.strip()}",
+                    error_message=f"infer.py exited with code {returncode}: {stderr_str.strip()}",
                     wall_time_s=wall_elapsed,
                     start_temp=start_temp,
                     end_temp=end_temp,
                     throttled_flag=end_throttled
                 )
             else:
-                print(f"Inference completed successfully in {wall_elapsed:.2f}s!")
+                print(f"Inference completed successfully in {wall_elapsed:.3f}s!")
                 pred_json_file = output_dir / "predictions.json"
                 pred_csv_file = output_dir / "predictions.csv"
                 if pred_json_file.exists():
                     predictions = parse_json_file(pred_json_file)
+                    if self.verbose:
+                        print(f"   [Output] predictions.json detected ({type(predictions).__name__})")
                 elif pred_csv_file.exists():
                     predictions = parse_csv_file(pred_csv_file)
+                    if self.verbose:
+                        print(f"   [Output] predictions.csv detected ({len(predictions)} rows)")
                 else:
                     predictions = None
+                    if self.verbose:
+                        print("   [Output Warning] Neither predictions.json nor predictions.csv was generated in outputs/!")
 
                 timings = parse_csv_file(output_dir / "timings.csv")
                 benchmark = parse_json_file(output_dir / "benchmark.json")
+
+                if self.verbose:
+                    if timings:
+                        print(f"   [Output] timings.csv detected ({len(timings)} records)")
+                    if benchmark:
+                        print(f"   [Output] benchmark.json detected: {benchmark}")
 
                 self._send_result(
                     job_id,
@@ -313,9 +431,9 @@ class SlaveRunner:
         end_temp: Optional[float] = None,
         throttled_flag: Optional[str] = None
     ):
-        return_url = f"{config.MASTER_URL}/api/v1/jobs/{job_id}/return"
+        return_url = f"{self.master_url}/api/v1/jobs/{job_id}/return"
         payload = {
-            "slave_id": config.SLAVE_ID,
+            "slave_id": self.slave_id,
             "status": status,
             "predictions": predictions,
             "timings": timings,
@@ -353,6 +471,37 @@ class SlaveRunner:
         time.sleep(config.COOLDOWN_SLEEP_SECONDS)
 
 
-if __name__ == "__main__":
-    runner = SlaveRunner()
+def main():
+    parser = argparse.ArgumentParser(description="TESA Slave Worker Node Daemon")
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable verbose mode: streams dependency installation and infer.py execution in real time"
+    )
+    parser.add_argument(
+        "--slave-id",
+        type=str,
+        default=None,
+        help=f"Override SLAVE_ID (default: {config.SLAVE_ID})"
+    )
+    parser.add_argument(
+        "--master-url",
+        type=str,
+        default=None,
+        help=f"Override MASTER_URL (default: {config.MASTER_URL})"
+    )
+
+    args = parser.parse_args()
+    is_verbose = args.verbose or config.VERBOSE
+
+    runner = SlaveRunner(
+        verbose=is_verbose,
+        slave_id=args.slave_id,
+        master_url=args.master_url
+    )
     runner.run()
+
+
+if __name__ == "__main__":
+    main()
