@@ -130,11 +130,11 @@ class SlaveRunner:
             return
 
         # Step 3: Install Dependencies
-        print("Installing contestant dependencies ...")
+        print(f"Installing contestant dependencies (timeout: {config.DEPENDENCY_TIMEOUT_SECONDS}s) ...")
         install_ok, install_logs = self.sandbox_mgr.install_dependencies(
             sandbox_dir,
             wheelhouse_dir=config.LOCAL_WHEELHOUSE,
-            timeout_seconds=240
+            timeout_seconds=config.DEPENDENCY_TIMEOUT_SECONDS
         )
         if not install_ok:
             print(f"Dependency installation failed for {job_id}!")

@@ -62,7 +62,7 @@ class SandboxManager:
         self,
         sandbox_dir: Path,
         wheelhouse_dir: Optional[Path] = None,
-        timeout_seconds: int = 240
+        timeout_seconds: int = 600
     ) -> Tuple[bool, str]:
         req_file = sandbox_dir / "requirements.txt"
         if not req_file.exists():
@@ -74,7 +74,7 @@ class SandboxManager:
 
         # Upgrade pip tooling quietly
         subprocess.run([str(pip_bin), "install", "--upgrade", "pip", "setuptools", "wheel"],
-                       capture_output=True, timeout=60)
+                       capture_output=True, timeout=120)
 
         logs = []
 

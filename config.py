@@ -34,6 +34,7 @@ class SlaveConfig:
     ).resolve()
 
     INFERENCE_THREADS: int = int(os.getenv("INFERENCE_THREADS", "2"))
+    DEPENDENCY_TIMEOUT_SECONDS: int = int(os.getenv("DEPENDENCY_TIMEOUT_SECONDS", "600"))
 
 
 config = SlaveConfig()
