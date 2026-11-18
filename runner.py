@@ -111,12 +111,14 @@ class SlaveRunner:
         self,
         verbose: Optional[bool] = None,
         slave_id: Optional[str] = None,
-        master_url: Optional[str] = None
+        master_url: Optional[str] = None,
+        day: Optional[int] = None
     ):
         self.sandbox_mgr = SandboxManager()
         self.verbose = verbose if verbose is not None else config.VERBOSE
         self.slave_id = slave_id or config.SLAVE_ID
         self.master_url = (master_url or config.MASTER_URL).rstrip("/")
+        self.day = day
 
     def run(self):
         print("=" * 65)
@@ -150,6 +152,8 @@ class SlaveRunner:
             "current_temp": current_temp,
             "throttled_flag": throttled_flag
         }
+        if self.day:
+            params["day"] = self.day
 
         if self.verbose:
             sys.stdout.write(f"\r[Polling] Checking Master for jobs (Temp: {current_temp:.1f}°C, Throttled: {throttled_flag}) ...")
@@ -453,6 +457,27 @@ class SlaveRunner:
             r = requests.post(return_url, json=payload, timeout=30)
             if r.status_code == 200:
                 print(f"[Result Recorded] Job {job_id} returned successfully.")
+                res_data = r.json()
+                eval_data = res_data.get("evaluation")
+                if eval_data:
+                    eval_day = eval_data.get("day", 1)
+                    if eval_day == 2:
+                        print("============================================================")
+                        print(f" [Day 2 Evaluation Summary for {job_id}]")
+                        print(f"  * Latency:       {eval_data.get('latency', 0.0):.3f}s")
+                        print(f"  * Count Acc:     {eval_data.get('count_accuracy', 0.0):.2f}%")
+                        print(f"  * IoU >= 95%:    {eval_data.get('iou95', 0)} / {eval_data.get('total_gt_objects', 0)}")
+                        print(f"  * IoU >= 90%:    {eval_data.get('iou90', 0)} / {eval_data.get('total_gt_objects', 0)}")
+                        print(f"  * IoU Avg:       {eval_data.get('iou_average', 0.0):.4f}")
+                        print(f"  * Composite:     {eval_data.get('composite_score', 0.0):.2f}")
+                        print("============================================================")
+                    elif eval_day == 1:
+                        print("============================================================")
+                        print(f" [Day 1 Evaluation Summary for {job_id}]")
+                        print(f"  * Accuracy:      {eval_data.get('accuracy', 0.0):.2f}%")
+                        print(f"  * Correct Pics:  {eval_data.get('correct_predictions', 0)} / {eval_data.get('total_images', 0)}")
+                        print(f"  * Total Wall:    {eval_data.get('total_wall_time_s', 0.0):.3f}s")
+                        print("============================================================")
             else:
                 print(f"[Return Error] Master returned {r.status_code}: {r.text}")
         except Exception as e:
@@ -486,6 +511,13 @@ def main():
         help=f"Override SLAVE_ID (default: {config.SLAVE_ID})"
     )
     parser.add_argument(
+        "--day",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="Target competition day (default: whatever active day Master server runs)"
+    )
+    parser.add_argument(
         "--master-url",
         type=str,
         default=None,
@@ -498,7 +530,8 @@ def main():
     runner = SlaveRunner(
         verbose=is_verbose,
         slave_id=args.slave_id,
-        master_url=args.master_url
+        master_url=args.master_url,
+        day=args.day
     )
     runner.run()
 
